@@ -31,6 +31,7 @@ async function run() {
         const paymentCollection = client.db('estateEase').collection('payments');
         const couponCollection = client.db('estateEase').collection('coupons');
         const userCollection = client.db('estateEase').collection('users');
+        const announcementCollection = client.db('estateEase').collection('announcements');
 
         // Routes
 
@@ -169,6 +170,19 @@ async function run() {
                 res.status(500).json({ message: 'Failed to fetch users' });
             }
         });
+        app.get('/users/:email', async (req, res) => {
+            const { email } = req.params;
+
+            try {
+                const user = await userCollection.findOne({ email });
+                if (!user) {
+                    return res.status(404).json({ message: 'User not found' });
+                }
+                res.json(user);
+            } catch (error) {
+                res.status(500).json({ message: 'Error fetching user details', error });
+            }
+        });
 
         // Update User Role to "user"
         app.put('/users/:id', async (req, res) => {
@@ -191,6 +205,39 @@ async function run() {
                 res.status(500).json({ message: 'Failed to update user role' });
             }
         });
+        // Post route for creating an announcement
+        app.post('/announcements', (req, res) => {
+            const { title, description, createdAt } = req.body;
+
+            const newAnnouncement = {
+                title,
+                description,
+                createdAt,
+            };
+
+            announcementCollection.insertOne(newAnnouncement)
+                .then(result => {
+                    res.status(201).json({
+                        message: 'Announcement created successfully',
+                        announcementId: result.insertedId,
+                    });
+                })
+                .catch(error => {
+                    console.error(error);
+                    res.status(500).json({ message: 'Failed to create announcement' });
+                });
+        });
+        app.get('/announcements', (req, res) => {
+            announcementCollection.find().toArray()
+                .then(announcements => {
+                    res.json(announcements);
+                })
+                .catch(error => {
+                    console.error(error);
+                    res.status(500).json({ message: 'Failed to fetch announcements' });
+                });
+        });
+
 
 
     } finally {
