@@ -4,6 +4,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
+const Stripe = require('stripe');
+
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 // Middleware
 app.use(cors());
@@ -22,8 +25,8 @@ const client = new MongoClient(uri, {
 
 async function run() {
     try {
-        await client.connect();
-        console.log('Connected to MongoDB successfully!');
+        // await client.connect();
+        // console.log('Connected to MongoDB successfully!');
 
         // Collections
         const apartmentCollection = client.db('estateEase').collection('apartments');
@@ -45,23 +48,22 @@ async function run() {
             }
         });
 
-        // **Agreements**
         app.post('/agreements', async (req, res) => {
             const { userName, userEmail, floorNo, blockName, apartmentNo, rent } = req.body;
-        
+
             try {
                 // Check if the user is an admin
                 const user = await userCollection.findOne({ email: userEmail }); // Assuming userCollection contains user data
                 if (user?.role === 'admin') {
                     return res.status(403).json({ message: 'Admins cannot create agreements.' });
                 }
-        
+
                 // Check if the user already has an existing agreement
                 const existingAgreement = await agreementCollection.findOne({ userEmail });
                 if (existingAgreement) {
                     return res.status(400).json({ message: 'User already has an agreement.' });
                 }
-        
+
                 const newAgreement = {
                     userName,
                     userEmail,
@@ -72,14 +74,14 @@ async function run() {
                     status: 'pending',
                     createdAt: new Date(),
                 };
-        
+
                 const result = await agreementCollection.insertOne(newAgreement);
                 res.status(201).json({ message: 'Agreement created successfully', agreementId: result.insertedId });
             } catch (error) {
                 res.status(500).json({ message: 'Failed to create agreement' });
             }
         });
-        
+
         app.get('/agreements', (req, res) => {
             agreementCollection.find({ status: "pending" }).toArray()
                 .then(agreements => {
@@ -90,7 +92,7 @@ async function run() {
                     res.status(500).json({ message: 'Failed to fetch agreements' });
                 });
         });
-        
+
         app.get('/agreements/:email', async (req, res) => {
             const { email } = req.params;
 
@@ -154,11 +156,12 @@ async function run() {
             }
         });
         app.post('/coupons', async (req, res) => {
-            const { code, discount, expiration,description
+            const { code, discount, expiration, description
             } = req.body;
 
             try {
-                const newCoupon = { code, discount, expiration,description
+                const newCoupon = {
+                    code, discount, expiration, description
                 };
                 const result = await couponCollection.insertOne(newCoupon);
                 res.status(201).json({ message: 'Coupon created successfully', couponId: result.insertedId });
@@ -176,9 +179,46 @@ async function run() {
                     res.status(500).json({ message: 'Failed to fetch coupons' });
                 });
         })
+        app.put('/coupons/:id', (req, res) => {
+            const { id } = req.params;
+            const { code, discount, expiration, description } = req.body;
+
+            couponCollection.updateOne(
+                { _id: new ObjectId(id) },
+                {
+                    $set: {
+                        code,
+                        discount,
+                        expiration,
+                        description
+                    }
+                }
+            )
+                .then(result => {
+                    if (result.matchedCount === 0) {
+                        res.status(404).json({ message: 'Coupon not found' });
+                    } else {
+                        res.json({ message: 'Coupon updated successfully' });
+                    }
+                })
+                .catch(error => res.status(500).json({ message: 'Failed to update coupon', error }));
+        });
+        app.delete('/coupons/:id', (req, res) => {
+            const { id } = req.params;
+
+            couponCollection.deleteOne({ _id: new ObjectId(id) })
+                .then(result => {
+                    if (result.deletedCount === 0) {
+                        res.status(404).json({ message: 'Coupon not found' });
+                    } else {
+                        res.json({ message: 'Coupon deleted successfully' });
+                    }
+                })
+                .catch(error => res.status(500).json({ message: 'Failed to delete coupon', error }));
+        });
         app.post('/users', async (req, res) => {
             const { email, displayName, lastLogin, role } = req.body;
-            console.log(email,displayName)
+            console.log(email, displayName)
 
             const existingUser = await userCollection.findOne({ email });
 
@@ -190,9 +230,9 @@ async function run() {
                 res.json({ message: 'User login time updated successfully', result });
             } else {
                 const newUser = { email, displayName, role: role || 'user', lastLogin: new Date(lastLogin) };
-                console.log("inserted data",newUser);
+                console.log("inserted data", newUser);
                 const result = await userCollection.insertOne(newUser);
-                console.log("user",result);
+                console.log("user", result);
                 res.status(201).json({ message: 'User created successfully', userId: result.insertedId });
             }
         });
@@ -271,58 +311,100 @@ async function run() {
                     res.status(500).json({ message: 'Failed to fetch announcements' });
                 });
         });
-        
+        app.post('/create-payment-intent', async (req, res) => {
+            const { price } = req.body;
+            const amount = parseInt(price * 100);
+            console.log('final amount',amount)
+
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                payment_method_types: ['card']
+            });
+            res.send({
+                clientSecret: paymentIntent.client_secret
+            })
+        });
+
+
+        // Insert Payment record into DB
+        app.post('/payments', async (req, res) => {
+            const { userEmail, floorNo, blockName, apartmentNo, originalRent, finalRent, discount, month } = req.body;
+
+            try {
+                const newPayment = {
+                    userEmail,
+                    floorNo,
+                    blockName,
+                    apartmentNo,
+                    originalRent,
+                    finalRent,
+                    discount,
+                    month,
+                    paymentDate: new Date(),
+                };
+
+                const result = await paymentCollection.insertOne(newPayment);
+                res.status(201).json({ message: 'Payment recorded successfully', paymentId: result.insertedId });
+            } catch (error) {
+                console.error('Error recording payment:', error);
+                res.status(500).json({ message: 'Failed to record payment' });
+            }
+        });
+
+
         // Accept or Reject Agreement - Combined
-app.put('/agreements/:id/update', (req, res) => {
-    const { id } = req.params;
-    const { status, role } = req.body;
+        app.put('/agreements/:id/update', (req, res) => {
+            const { id } = req.params;
+            const { status, role } = req.body;
 
-    // Validate incoming data
-    if (!status) {
-        return res.status(400).json({ message: 'Status is required.' });
-    }
-
-    agreementCollection.findOne({ _id: new ObjectId(id) })
-        .then(agreement => {
-            if (!agreement) {
-                return res.status(404).json({ message: 'Agreement not found.' });
+            // Validate incoming data
+            if (!status) {
+                return res.status(400).json({ message: 'Status is required.' });
             }
 
-            // Update agreement's status
-            agreementCollection.updateOne(
-                { _id: new ObjectId(id) },
-                { $set: { status } }
-            )
-                .then(() => {
-                    if (status === 'accepted' && role) {
-                        // Update user's role
-                        userCollection.updateOne(
-                            { email: agreement.userEmail },
-                            { $set: { role } }
-                        )
-                            .then(() => {
-                                res.status(200).json({ message: `Agreement ${status} and user role updated.` });
-                            })
-                            .catch(error => {
-                                console.error('Error updating user role:', error);
-                                res.status(500).json({ message: 'Failed to update user role.' });
-                            });
-                    } else if (status === 'rejected') {
-                        res.status(200).json({ message: `Agreement ${status}.` });
-                    } else {
-                        res.status(400).json({ message: 'Invalid request parameters.' });
+            agreementCollection.findOne({ _id: new ObjectId(id) })
+                .then(agreement => {
+                    if (!agreement) {
+                        return res.status(404).json({ message: 'Agreement not found.' });
                     }
+
+                    // Update agreement's status
+                    agreementCollection.updateOne(
+                        { _id: new ObjectId(id) },
+                        { $set: { status } }
+                    )
+                        .then(() => {
+                            if (status === 'accepted' && role) {
+                                // Update user's role
+                                userCollection.updateOne(
+                                    { email: agreement.userEmail },
+                                    { $set: { role } }
+                                )
+                                    .then(() => {
+                                        res.status(200).json({ message: `Agreement ${status} and user role updated.` });
+                                    })
+                                    .catch(error => {
+                                        console.error('Error updating user role:', error);
+                                        res.status(500).json({ message: 'Failed to update user role.' });
+                                    });
+                            } else if (status === 'rejected') {
+                                res.status(200).json({ message: `Agreement ${status}.` });
+                            } else {
+                                res.status(400).json({ message: 'Invalid request parameters.' });
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error updating agreement status:', error);
+                            res.status(500).json({ message: 'Failed to update agreement status.' });
+                        });
                 })
                 .catch(error => {
-                    console.error('Error updating agreement status:', error);
-                    res.status(500).json({ message: 'Failed to update agreement status.' });
+                    console.error('Error finding agreement:', error);
+                    res.status(500).json({ message: 'Failed to fetch agreement.' });
                 });
-        })
-        .catch(error => {
-            console.error('Error finding agreement:', error);
-            res.status(500).json({ message: 'Failed to fetch agreement.' });
         });
-});
+
 
 
     } finally {
