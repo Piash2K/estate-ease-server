@@ -35,6 +35,7 @@ async function run() {
         const couponCollection = client.db('estateEase').collection('coupons');
         const userCollection = client.db('estateEase').collection('users');
         const announcementCollection = client.db('estateEase').collection('announcements');
+        const reviewCollection = client.db('estateEase').collection('reviews');
 
         // Routes
 
@@ -310,6 +311,14 @@ async function run() {
                     console.error(error);
                     res.status(500).json({ message: 'Failed to fetch announcements' });
                 });
+        });
+        app.get('/reviews', async (req, res) => {
+            try {
+                const reviews = await reviewCollection.find().toArray();
+                res.json(reviews);
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch reviews', error });
+            }
         });
         app.post('/create-payment-intent', async (req, res) => {
             const { price } = req.body;
