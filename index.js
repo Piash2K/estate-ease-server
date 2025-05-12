@@ -83,6 +83,7 @@ async function run() {
             }
         });
 
+        // Agreements related apis
         app.get('/agreements', (req, res) => {
             agreementCollection.find({ status: "pending" }).toArray()
                 .then(agreements => {
@@ -217,6 +218,7 @@ async function run() {
                 })
                 .catch(error => res.status(500).json({ message: 'Failed to delete coupon', error }));
         });
+        // users related apis
         app.post('/users', async (req, res) => {
             const { email, displayName, lastLogin, role } = req.body;
             console.log(email, displayName)
