@@ -1,4 +1,3 @@
-
 # 🏢 EstateEase – Backend Server
 
 The **EstateEase Server** is the backend service for the **EstateEase** building and property management platform. It provides secure APIs for managing properties, users, payments, and application logic using modern backend technologies.
