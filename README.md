@@ -152,6 +152,3 @@ Developed as part of the **EstateEase** full-stack project.
 ---
 
 ### ⭐ If you find this project useful, don’t forget to star the repository!
-
-```
-
