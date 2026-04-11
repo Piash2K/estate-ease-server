@@ -2,12 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
 const Stripe = require('stripe');
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+const JWT_SECRET = process.env.JWT_SECRET || 'estate-ease-dev-secret';
+const JWT_EXPIRES_IN = '7d';
 
 const buildApartmentData = (body, existingApartment = {}) => ({
     title: body.title || existingApartment.title,
@@ -90,10 +93,18 @@ async function run() {
 
         const requireAuth = async (req, res, next) => {
             try {
-                const email = req.headers['x-user-email'];
+                const authHeader = req.headers.authorization;
+
+                if (!authHeader || !authHeader.startsWith('Bearer ')) {
+                    return res.status(401).json({ message: 'Unauthorized. Missing token.' });
+                }
+
+                const token = authHeader.split(' ')[1];
+                const decoded = jwt.verify(token, JWT_SECRET);
+                const email = decoded?.email;
 
                 if (!email) {
-                    return res.status(401).json({ message: 'Unauthorized. Missing user email header.' });
+                    return res.status(401).json({ message: 'Unauthorized token payload.' });
                 }
 
                 const user = await userCollection.findOne({ email: String(email) });
@@ -425,10 +436,16 @@ async function run() {
                 };
 
                 const result = await userCollection.insertOne(newUser);
+                const token = jwt.sign(
+                    { email: newUser.email, role: newUser.role },
+                    JWT_SECRET,
+                    { expiresIn: JWT_EXPIRES_IN }
+                );
 
                 res.status(201).json({
                     message: 'User registered successfully',
                     userId: result.insertedId,
+                    token,
                 });
             } catch (error) {
                 res.status(500).json({ message: 'Failed to register user' });
@@ -458,8 +475,15 @@ async function run() {
                     { $set: { lastLogin: new Date() } }
                 );
 
+                const token = jwt.sign(
+                    { email: user.email, role: user.role || 'user' },
+                    JWT_SECRET,
+                    { expiresIn: JWT_EXPIRES_IN }
+                );
+
                 res.json({
                     message: 'Login successful',
+                    token,
                     user: {
                         email: user.email,
                         displayName: user.displayName,
