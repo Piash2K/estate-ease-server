@@ -121,6 +121,16 @@ async function run() {
             next();
         };
 
+        const validateObjectIdParam = (paramName = 'id') => (req, res, next) => {
+            const value = req.params?.[paramName];
+
+            if (!ObjectId.isValid(value)) {
+                return res.status(400).json({ message: `Invalid ${paramName}` });
+            }
+
+            next();
+        };
+
         // Routes
 
         // **Apartments** - Get All Apartments
@@ -236,7 +246,7 @@ async function run() {
             }
         });
 
-        app.patch('/apartments/:id', async (req, res) => {
+        app.patch('/apartments/:id', validateObjectIdParam('id'), async (req, res) => {
             try {
                 const { id } = req.params;
                 const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
@@ -258,7 +268,7 @@ async function run() {
             }
         });
 
-        app.get('/apartments/:id', async (req, res) => {
+        app.get('/apartments/:id', validateObjectIdParam('id'), async (req, res) => {
             try {
                 const { id } = req.params;
                 const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
@@ -299,7 +309,7 @@ async function run() {
             }
         });
 
-        app.get('/apartments/:id/reviews', async (req, res) => {
+        app.get('/apartments/:id/reviews', validateObjectIdParam('id'), async (req, res) => {
             try {
                 const { id } = req.params;
                 const reviews = await reviewCollection.find({ apartmentId: id }).sort({ createdAt: -1 }).toArray();
@@ -314,7 +324,7 @@ async function run() {
             }
         });
 
-        app.post('/apartments/:id/reviews', async (req, res) => {
+        app.post('/apartments/:id/reviews', validateObjectIdParam('id'), async (req, res) => {
             try {
                 const { id } = req.params;
                 const { userName, userEmail, comment, rating } = req.body;
@@ -353,7 +363,7 @@ async function run() {
             }
         });
 
-        app.post('/apartments/:id/actions', async (req, res) => {
+        app.post('/apartments/:id/actions', validateObjectIdParam('id'), async (req, res) => {
             try {
                 const { id } = req.params;
                 const { action, userEmail } = req.body;
@@ -676,7 +686,7 @@ async function run() {
             }
         });
 
-        app.get('/blogs/:id', async (req, res) => {
+        app.get('/blogs/:id', validateObjectIdParam('id'), async (req, res) => {
             try {
                 const { id } = req.params;
                 const blog = await blogCollection.findOne({ _id: new ObjectId(id), isPublished: { $ne: false } });
@@ -896,7 +906,7 @@ async function run() {
                     res.status(500).json({ message: 'Failed to fetch coupons' });
                 });
         })
-        app.put('/coupons/:id', requireAuth, requireRole(['admin']), (req, res) => {
+        app.put('/coupons/:id', requireAuth, requireRole(['admin']), validateObjectIdParam('id'), (req, res) => {
             const { id } = req.params;
             const { code, discount, expiration, description } = req.body;
 
@@ -920,7 +930,7 @@ async function run() {
                 })
                 .catch(error => res.status(500).json({ message: 'Failed to update coupon', error }));
         });
-        app.delete('/coupons/:id', requireAuth, requireRole(['admin']), (req, res) => {
+        app.delete('/coupons/:id', requireAuth, requireRole(['admin']), validateObjectIdParam('id'), (req, res) => {
             const { id } = req.params;
 
             couponCollection.deleteOne({ _id: new ObjectId(id) })
@@ -977,7 +987,7 @@ async function run() {
         });
 
         // Update User Role to "user"
-        app.put('/users/:id', requireAuth, requireRole(['admin']), async (req, res) => {
+        app.put('/users/:id', requireAuth, requireRole(['admin']), validateObjectIdParam('id'), async (req, res) => {
             const { id } = req.params;
             const { role } = req.body;
 
@@ -1080,7 +1090,7 @@ async function run() {
 
 
         // Accept or Reject Agreement - Combined
-        app.put('/agreements/:id/update', requireAuth, requireRole(['admin', 'manager']), (req, res) => {
+        app.put('/agreements/:id/update', requireAuth, requireRole(['admin', 'manager']), validateObjectIdParam('id'), (req, res) => {
             const { id } = req.params;
             const { status, role } = req.body;
 
