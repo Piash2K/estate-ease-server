@@ -210,8 +210,10 @@ async function run() {
                 const relatedApartments = await apartmentCollection
                     .find({
                         _id: { $ne: new ObjectId(id) },
+                        isPublic: true,
                         'meta.type': apartment?.meta?.type || 'apartment',
                     })
+                    .sort({ 'meta.rating': -1, createdAt: -1 })
                     .limit(4)
                     .toArray();
 
