@@ -115,6 +115,45 @@ async function run() {
             }
         });
 
+        app.get('/apartments/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
+
+                if (!apartment) {
+                    return res.status(404).json({ message: 'Apartment not found' });
+                }
+
+                const relatedApartments = await apartmentCollection
+                    .find({
+                        _id: { $ne: new ObjectId(id) },
+                        'meta.type': apartment?.meta?.type || 'apartment',
+                    })
+                    .limit(4)
+                    .toArray();
+
+                res.json({
+                    item: apartment,
+                    sections: {
+                        overview: apartment.overview || apartment.description || '',
+                        description: apartment.description || apartment.overview || '',
+                        keyInformation: apartment.keyInformation || [],
+                        specs: apartment.specs || [],
+                        rules: apartment.rules || [],
+                        media: apartment.media || [],
+                        relatedItems: relatedApartments,
+                    },
+                    actions: apartment.actions || ['view'],
+                });
+            } catch (error) {
+                if (error?.message?.includes('input must be a 24 character hex string')) {
+                    return res.status(400).json({ message: 'Invalid apartment id' });
+                }
+
+                res.status(500).json({ message: 'Failed to fetch apartment details', error: error.message });
+            }
+        });
+
         app.post('/agreements', async (req, res) => {
             const { userName, userEmail, floorNo, blockName, apartmentNo, rent } = req.body;
 
