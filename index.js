@@ -293,6 +293,45 @@ async function run() {
             }
         });
 
+        app.post('/apartments/:id/actions', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { action, userEmail } = req.body;
+
+                if (!action) {
+                    return res.status(400).json({ message: 'Action is required' });
+                }
+
+                const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
+                if (!apartment) {
+                    return res.status(404).json({ message: 'Apartment not found' });
+                }
+
+                await apartmentCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $inc: { [`stats.${action}Count`]: 1 },
+                        $push: {
+                            actionLogs: {
+                                action,
+                                userEmail: userEmail || '',
+                                createdAt: new Date(),
+                            },
+                        },
+                        $set: { updatedAt: new Date() },
+                    }
+                );
+
+                res.json({ message: 'Action recorded successfully' });
+            } catch (error) {
+                if (error?.message?.includes('input must be a 24 character hex string')) {
+                    return res.status(400).json({ message: 'Invalid apartment id' });
+                }
+
+                res.status(500).json({ message: 'Failed to record action' });
+            }
+        });
+
         app.post('/agreements', async (req, res) => {
             const { userName, userEmail, floorNo, blockName, apartmentNo, rent } = req.body;
 
