@@ -239,6 +239,60 @@ async function run() {
             }
         });
 
+        app.get('/apartments/:id/reviews', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const reviews = await reviewCollection.find({ apartmentId: id }).sort({ createdAt: -1 }).toArray();
+
+                res.json(reviews);
+            } catch (error) {
+                if (error?.message?.includes('input must be a 24 character hex string')) {
+                    return res.status(400).json({ message: 'Invalid apartment id' });
+                }
+
+                res.status(500).json({ message: 'Failed to fetch apartment reviews' });
+            }
+        });
+
+        app.post('/apartments/:id/reviews', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { userName, userEmail, comment, rating } = req.body;
+
+                if (!comment || !String(comment).trim()) {
+                    return res.status(400).json({ message: 'Comment is required' });
+                }
+
+                const newReview = {
+                    apartmentId: id,
+                    userName: userName || 'Anonymous',
+                    userEmail: userEmail || '',
+                    comment,
+                    rating: Number(rating) || 0,
+                    createdAt: new Date(),
+                };
+
+                await reviewCollection.insertOne(newReview);
+
+                const reviews = await reviewCollection.find({ apartmentId: id }).toArray();
+                const totalRating = reviews.reduce((sum, review) => sum + (Number(review.rating) || 0), 0);
+                const averageRating = reviews.length ? totalRating / reviews.length : 0;
+
+                await apartmentCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { 'meta.rating': averageRating, updatedAt: new Date() } }
+                );
+
+                res.status(201).json({ message: 'Review added successfully' });
+            } catch (error) {
+                if (error?.message?.includes('input must be a 24 character hex string')) {
+                    return res.status(400).json({ message: 'Invalid apartment id' });
+                }
+
+                res.status(500).json({ message: 'Failed to add review' });
+            }
+        });
+
         app.post('/agreements', async (req, res) => {
             const { userName, userEmail, floorNo, blockName, apartmentNo, rent } = req.body;
 
