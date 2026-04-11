@@ -66,8 +66,71 @@ async function run() {
         // **Apartments** - Get All Apartments
         app.get('/apartments', async (req, res) => {
             try {
-                const apartments = await apartmentCollection.find().toArray();
-                res.json(apartments);
+                const {
+                    search = '',
+                    status,
+                    location,
+                    type,
+                    minPrice,
+                    maxPrice,
+                    minRating,
+                    sortBy = 'createdAt',
+                    sortOrder = 'desc',
+                    page = '1',
+                    limit = '12',
+                } = req.query;
+
+                const currentPage = Math.max(1, parseInt(page) || 1);
+                const perPage = Math.min(50, Math.max(1, parseInt(limit) || 12));
+                const skip = (currentPage - 1) * perPage;
+
+                const query = { isPublic: true };
+
+                if (search.trim()) {
+                    query.$or = [
+                        { title: { $regex: search, $options: 'i' } },
+                        { shortDescription: { $regex: search, $options: 'i' } },
+                        { overview: { $regex: search, $options: 'i' } },
+                    ];
+                }
+
+                if (status) query['meta.status'] = status;
+                if (location) query['meta.location'] = location;
+                if (type) query['meta.type'] = type;
+
+                if (minPrice || maxPrice) {
+                    query['meta.price'] = {};
+                    if (minPrice) query['meta.price'].$gte = Number(minPrice);
+                    if (maxPrice) query['meta.price'].$lte = Number(maxPrice);
+                }
+
+                if (minRating) {
+                    query['meta.rating'] = { $gte: Number(minRating) };
+                }
+
+                const allowedSortFields = ['createdAt', 'meta.price', 'meta.rating', 'title', 'meta.date'];
+                const finalSortBy = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+                const finalSortOrder = sortOrder === 'asc' ? 1 : -1;
+
+                const [apartments, total] = await Promise.all([
+                    apartmentCollection
+                        .find(query)
+                        .sort({ [finalSortBy]: finalSortOrder })
+                        .skip(skip)
+                        .limit(perPage)
+                        .toArray(),
+                    apartmentCollection.countDocuments(query),
+                ]);
+
+                res.json({
+                    data: apartments,
+                    pagination: {
+                        page: currentPage,
+                        limit: perPage,
+                        total,
+                        totalPages: Math.ceil(total / perPage),
+                    },
+                });
             } catch (error) {
                 res.status(500).json({ message: 'Failed to fetch apartments' });
             }
