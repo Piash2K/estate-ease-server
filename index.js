@@ -74,12 +74,19 @@ async function run() {
         const userCollection = client.db('estateEase').collection('users');
         const announcementCollection = client.db('estateEase').collection('announcements');
         const reviewCollection = client.db('estateEase').collection('reviews');
+        const sitePageCollection = client.db('estateEase').collection('sitePages');
+        const blogCollection = client.db('estateEase').collection('blogs');
+        const contactMessageCollection = client.db('estateEase').collection('contactMessages');
+        const newsletterCollection = client.db('estateEase').collection('newsletters');
 
         await apartmentCollection.createIndex({ isPublic: 1, createdAt: -1 });
         await apartmentCollection.createIndex({ 'meta.status': 1, 'meta.location': 1, 'meta.type': 1 });
         await apartmentCollection.createIndex({ 'meta.price': 1, 'meta.rating': -1 });
         await apartmentCollection.createIndex({ title: 'text', shortDescription: 'text', overview: 'text', description: 'text' });
         await reviewCollection.createIndex({ apartmentId: 1, createdAt: -1 });
+        await sitePageCollection.createIndex({ slug: 1 }, { unique: true });
+        await blogCollection.createIndex({ createdAt: -1 });
+        await newsletterCollection.createIndex({ email: 1 }, { unique: true });
 
         const requireAuth = async (req, res, next) => {
             try {
@@ -594,6 +601,166 @@ async function run() {
                 res.json({ message: 'Profile updated successfully' });
             } catch (error) {
                 res.status(500).json({ message: 'Failed to update profile' });
+            }
+        });
+
+        app.get('/pages/:slug', async (req, res) => {
+            try {
+                const { slug } = req.params;
+                const page = await sitePageCollection.findOne({ slug, isPublished: { $ne: false } });
+
+                if (!page) {
+                    return res.status(404).json({ message: 'Page not found' });
+                }
+
+                res.json(page);
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch page content' });
+            }
+        });
+
+        app.put('/pages/:slug', requireAuth, requireRole(['admin']), async (req, res) => {
+            try {
+                const { slug } = req.params;
+                const { title, content, sections, isPublished = true } = req.body;
+
+                await sitePageCollection.updateOne(
+                    { slug },
+                    {
+                        $set: {
+                            slug,
+                            title: title || slug,
+                            content: content || '',
+                            sections: sections || [],
+                            isPublished,
+                            updatedAt: new Date(),
+                        },
+                        $setOnInsert: { createdAt: new Date() },
+                    },
+                    { upsert: true }
+                );
+
+                res.json({ message: 'Page saved successfully' });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to save page content' });
+            }
+        });
+
+        app.get('/blogs', async (req, res) => {
+            try {
+                const page = Math.max(1, parseInt(req.query.page) || 1);
+                const limit = Math.min(20, Math.max(1, parseInt(req.query.limit) || 10));
+                const skip = (page - 1) * limit;
+
+                const [data, total] = await Promise.all([
+                    blogCollection
+                        .find({ isPublished: { $ne: false } })
+                        .sort({ createdAt: -1 })
+                        .skip(skip)
+                        .limit(limit)
+                        .toArray(),
+                    blogCollection.countDocuments({ isPublished: { $ne: false } }),
+                ]);
+
+                res.json({
+                    data,
+                    pagination: {
+                        page,
+                        limit,
+                        total,
+                        totalPages: Math.ceil(total / limit),
+                    },
+                });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch blogs' });
+            }
+        });
+
+        app.get('/blogs/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const blog = await blogCollection.findOne({ _id: new ObjectId(id), isPublished: { $ne: false } });
+
+                if (!blog) {
+                    return res.status(404).json({ message: 'Blog not found' });
+                }
+
+                res.json(blog);
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch blog details' });
+            }
+        });
+
+        app.post('/blogs', requireAuth, requireRole(['admin']), async (req, res) => {
+            try {
+                const { title, coverImage, summary, content, tags = [], isPublished = true } = req.body;
+
+                if (!title || !summary) {
+                    return res.status(400).json({ message: 'Title and summary are required' });
+                }
+
+                const result = await blogCollection.insertOne({
+                    title,
+                    coverImage: coverImage || '',
+                    summary,
+                    content: content || '',
+                    tags,
+                    isPublished,
+                    authorEmail: req.user.email,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                });
+
+                res.status(201).json({ message: 'Blog created successfully', blogId: result.insertedId });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to create blog' });
+            }
+        });
+
+        app.post('/contact-messages', async (req, res) => {
+            try {
+                const { name, email, subject, message } = req.body;
+
+                if (!name || !email || !message) {
+                    return res.status(400).json({ message: 'Name, email and message are required' });
+                }
+
+                await contactMessageCollection.insertOne({
+                    name,
+                    email,
+                    subject: subject || '',
+                    message,
+                    status: 'new',
+                    createdAt: new Date(),
+                });
+
+                res.status(201).json({ message: 'Contact message submitted successfully' });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to submit contact message' });
+            }
+        });
+
+        app.post('/newsletter/subscribe', async (req, res) => {
+            try {
+                const { email } = req.body;
+
+                if (!email) {
+                    return res.status(400).json({ message: 'Email is required' });
+                }
+
+                const existing = await newsletterCollection.findOne({ email });
+                if (existing) {
+                    return res.json({ message: 'Already subscribed' });
+                }
+
+                await newsletterCollection.insertOne({
+                    email,
+                    createdAt: new Date(),
+                });
+
+                res.status(201).json({ message: 'Newsletter subscription successful' });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to subscribe newsletter' });
             }
         });
 
