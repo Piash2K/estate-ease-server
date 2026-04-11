@@ -454,6 +454,149 @@ async function run() {
             }
         });
 
+        app.get('/dashboard/menu', requireAuth, (req, res) => {
+            const role = req.user?.role || 'user';
+
+            if (role === 'admin' || role === 'manager') {
+                return res.json({
+                    role,
+                    items: ['overview', 'manage-users', 'manage-agreements', 'manage-coupons', 'manage-announcements'],
+                });
+            }
+
+            res.json({
+                role,
+                items: ['overview', 'my-profile', 'my-agreements'],
+            });
+        });
+
+        app.get('/dashboard/overview', requireAuth, async (req, res) => {
+            try {
+                const role = req.user?.role || 'user';
+
+                if (role === 'admin' || role === 'manager') {
+                    const [totalUsers, totalApartments, pendingAgreements, totalPayments] = await Promise.all([
+                        userCollection.countDocuments(),
+                        apartmentCollection.countDocuments(),
+                        agreementCollection.countDocuments({ status: 'pending' }),
+                        paymentCollection.countDocuments(),
+                    ]);
+
+                    return res.json({
+                        role,
+                        cards: {
+                            totalUsers,
+                            totalApartments,
+                            pendingAgreements,
+                            totalPayments,
+                        },
+                    });
+                }
+
+                const [myAgreements, myPayments] = await Promise.all([
+                    agreementCollection.countDocuments({ userEmail: req.user.email }),
+                    paymentCollection.countDocuments({ userEmail: req.user.email }),
+                ]);
+
+                res.json({
+                    role,
+                    cards: {
+                        myAgreements,
+                        myPayments,
+                        accountRole: role,
+                    },
+                });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch dashboard overview' });
+            }
+        });
+
+        app.get('/dashboard/charts', requireAuth, async (req, res) => {
+            try {
+                const role = req.user?.role || 'user';
+
+                if (role === 'admin' || role === 'manager') {
+                    const [agreementStatuses, apartmentTypes] = await Promise.all([
+                        agreementCollection.aggregate([
+                            { $group: { _id: '$status', count: { $sum: 1 } } },
+                        ]).toArray(),
+                        apartmentCollection.aggregate([
+                            { $group: { _id: '$meta.type', count: { $sum: 1 } } },
+                        ]).toArray(),
+                    ]);
+
+                    return res.json({
+                        barChart: agreementStatuses,
+                        pieChart: apartmentTypes,
+                    });
+                }
+
+                const myAgreementStatus = await agreementCollection.aggregate([
+                    { $match: { userEmail: req.user.email } },
+                    { $group: { _id: '$status', count: { $sum: 1 } } },
+                ]).toArray();
+
+                res.json({
+                    barChart: myAgreementStatus,
+                    pieChart: [],
+                });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch chart data' });
+            }
+        });
+
+        app.get('/dashboard/table', requireAuth, async (req, res) => {
+            try {
+                const role = req.user?.role || 'user';
+
+                if (role === 'admin' || role === 'manager') {
+                    const rows = await agreementCollection.find().sort({ createdAt: -1 }).limit(10).toArray();
+                    return res.json(rows);
+                }
+
+                const rows = await paymentCollection.find({ userEmail: req.user.email }).sort({ paymentDate: -1 }).limit(10).toArray();
+                res.json(rows);
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch table data' });
+            }
+        });
+
+        app.get('/dashboard/profile', requireAuth, async (req, res) => {
+            try {
+                const user = await userCollection.findOne(
+                    { email: req.user.email },
+                    { projection: { password: 0 } }
+                );
+
+                res.json(user);
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch profile' });
+            }
+        });
+
+        app.patch('/dashboard/profile', requireAuth, async (req, res) => {
+            try {
+                const { displayName, phone, address, photoURL } = req.body;
+
+                await userCollection.updateOne(
+                    { email: req.user.email },
+                    {
+                        $set: {
+                            ...(displayName ? { displayName } : {}),
+                            ...(phone ? { phone } : {}),
+                            ...(address ? { address } : {}),
+                            ...(photoURL ? { photoURL } : {}),
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                res.json({ message: 'Profile updated successfully' });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to update profile' });
+            }
+        });
+
         app.post('/agreements', async (req, res) => {
             const { userName, userEmail, floorNo, blockName, apartmentNo, rent } = req.body;
 
