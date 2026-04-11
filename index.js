@@ -8,6 +8,30 @@ const Stripe = require('stripe');
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
+const buildApartmentData = (body, existingApartment = {}) => ({
+    title: body.title || existingApartment.title,
+    image: body.image || existingApartment.image,
+    icon: body.icon || existingApartment.icon,
+    shortDescription: body.shortDescription || existingApartment.shortDescription,
+    overview: body.overview || existingApartment.overview,
+    description: body.description || existingApartment.description,
+    media: body.media || existingApartment.media || [],
+    keyInformation: body.keyInformation || existingApartment.keyInformation || [],
+    specs: body.specs || existingApartment.specs || [],
+    rules: body.rules || existingApartment.rules || [],
+    primaryAction: body.primaryAction || existingApartment.primaryAction || 'view',
+    actions: body.actions || existingApartment.actions || ['view'],
+    meta: {
+        price: body?.meta?.price ?? existingApartment?.meta?.price ?? 0,
+        date: body?.meta?.date ?? existingApartment?.meta?.date ?? new Date(),
+        status: body?.meta?.status ?? existingApartment?.meta?.status ?? 'available',
+        rating: body?.meta?.rating ?? existingApartment?.meta?.rating ?? 0,
+        location: body?.meta?.location ?? existingApartment?.meta?.location ?? '',
+        type: body?.meta?.type ?? existingApartment?.meta?.type ?? 'apartment',
+    },
+    isPublic: body.isPublic ?? existingApartment.isPublic ?? true,
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -46,6 +70,48 @@ async function run() {
                 res.json(apartments);
             } catch (error) {
                 res.status(500).json({ message: 'Failed to fetch apartments' });
+            }
+        });
+
+        app.post('/apartments', async (req, res) => {
+            try {
+                const apartment = buildApartmentData(req.body);
+
+                if (!apartment.title || (!apartment.image && !apartment.icon)) {
+                    return res.status(400).json({ message: 'Title and image/icon are required.' });
+                }
+
+                const result = await apartmentCollection.insertOne({
+                    ...apartment,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                });
+
+                res.status(201).json({ message: 'Apartment created successfully', apartmentId: result.insertedId });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to create apartment', error: error.message });
+            }
+        });
+
+        app.patch('/apartments/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
+
+                if (!apartment) {
+                    return res.status(404).json({ message: 'Apartment not found' });
+                }
+
+                const updatedApartment = buildApartmentData(req.body, apartment);
+
+                await apartmentCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { ...updatedApartment, updatedAt: new Date() } }
+                );
+
+                res.json({ message: 'Apartment updated successfully' });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to update apartment', error: error.message });
             }
         });
 
