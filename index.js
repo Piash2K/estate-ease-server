@@ -61,6 +61,12 @@ async function run() {
         const announcementCollection = client.db('estateEase').collection('announcements');
         const reviewCollection = client.db('estateEase').collection('reviews');
 
+        await apartmentCollection.createIndex({ isPublic: 1, createdAt: -1 });
+        await apartmentCollection.createIndex({ 'meta.status': 1, 'meta.location': 1, 'meta.type': 1 });
+        await apartmentCollection.createIndex({ 'meta.price': 1, 'meta.rating': -1 });
+        await apartmentCollection.createIndex({ title: 'text', shortDescription: 'text', overview: 'text', description: 'text' });
+        await reviewCollection.createIndex({ apartmentId: 1, createdAt: -1 });
+
         // Routes
 
         // **Apartments** - Get All Apartments
