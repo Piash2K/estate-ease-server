@@ -1126,32 +1126,6 @@ async function run() {
         });
 
 
-        // Insert Payment record into DB
-        app.post('/payments', async (req, res) => {
-            const { userEmail, floorNo, blockName, apartmentNo, originalRent, finalRent, discount, month } = req.body;
-
-            try {
-                const newPayment = {
-                    userEmail,
-                    floorNo,
-                    blockName,
-                    apartmentNo,
-                    originalRent,
-                    finalRent,
-                    discount,
-                    month,
-                    paymentDate: new Date(),
-                };
-
-                const result = await paymentCollection.insertOne(newPayment);
-                res.status(201).json({ message: 'Payment recorded successfully', paymentId: result.insertedId });
-            } catch (error) {
-                console.error('Error recording payment:', error);
-                res.status(500).json({ message: 'Failed to record payment' });
-            }
-        });
-
-
         // Accept or Reject Agreement - Combined
         app.put('/agreements/:id/update', requireAuth, requireRole(['admin', 'manager']), validateObjectIdParam('id'), (req, res) => {
             const { id } = req.params;
