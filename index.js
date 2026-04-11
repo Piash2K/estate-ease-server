@@ -11,6 +11,8 @@ const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const JWT_SECRET = process.env.JWT_SECRET || 'estate-ease-dev-secret';
 const JWT_EXPIRES_IN = '7d';
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 
 const buildApartmentData = (body, existingApartment = {}) => ({
     title: body.title || existingApartment.title,
@@ -47,6 +49,10 @@ const verifyPassword = (password, storedPassword) => {
 
     const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
     return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(testHash, 'hex'));
+};
+
+const isStrongPassword = (password = '') => {
+    return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/.test(password);
 };
 
 // Middleware
@@ -90,6 +96,8 @@ async function run() {
         await sitePageCollection.createIndex({ slug: 1 }, { unique: true });
         await blogCollection.createIndex({ createdAt: -1 });
         await newsletterCollection.createIndex({ email: 1 }, { unique: true });
+
+        const loginAttempts = new Map();
 
         const requireAuth = async (req, res, next) => {
             try {
@@ -421,6 +429,12 @@ async function run() {
                     return res.status(400).json({ message: 'Email, password and display name are required.' });
                 }
 
+                if (!isStrongPassword(password)) {
+                    return res.status(400).json({
+                        message: 'Password must be at least 8 chars and include uppercase, lowercase, number, and special character.',
+                    });
+                }
+
                 const existingUser = await userCollection.findOne({ email });
                 if (existingUser) {
                     return res.status(409).json({ message: 'User already exists.' });
@@ -455,6 +469,17 @@ async function run() {
         app.post(['/auth/login', '/login'], async (req, res) => {
             try {
                 const { email, password } = req.body;
+                const attemptKey = `${req.ip || 'unknown-ip'}:${email || 'no-email'}`;
+                const currentTime = Date.now();
+                const attemptData = loginAttempts.get(attemptKey);
+
+                if (attemptData && currentTime - attemptData.firstAttemptAt < LOGIN_ATTEMPT_WINDOW_MS && attemptData.count >= MAX_LOGIN_ATTEMPTS) {
+                    return res.status(429).json({ message: 'Too many login attempts. Please try again later.' });
+                }
+
+                if (attemptData && currentTime - attemptData.firstAttemptAt >= LOGIN_ATTEMPT_WINDOW_MS) {
+                    loginAttempts.delete(attemptKey);
+                }
 
                 if (!email || !password) {
                     return res.status(400).json({ message: 'Email and password are required.' });
@@ -462,13 +487,27 @@ async function run() {
 
                 const user = await userCollection.findOne({ email });
                 if (!user || !user.password) {
+                    const failedData = loginAttempts.get(attemptKey);
+                    if (!failedData) {
+                        loginAttempts.set(attemptKey, { count: 1, firstAttemptAt: currentTime });
+                    } else {
+                        loginAttempts.set(attemptKey, { ...failedData, count: failedData.count + 1 });
+                    }
                     return res.status(401).json({ message: 'Invalid credentials.' });
                 }
 
                 const isValidPassword = verifyPassword(password, user.password);
                 if (!isValidPassword) {
+                    const failedData = loginAttempts.get(attemptKey);
+                    if (!failedData) {
+                        loginAttempts.set(attemptKey, { count: 1, firstAttemptAt: currentTime });
+                    } else {
+                        loginAttempts.set(attemptKey, { ...failedData, count: failedData.count + 1 });
+                    }
                     return res.status(401).json({ message: 'Invalid credentials.' });
                 }
+
+                loginAttempts.delete(attemptKey);
 
                 await userCollection.updateOne(
                     { email },
