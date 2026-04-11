@@ -58,6 +58,26 @@ const isStrongPassword = (password = '') => {
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+    res.ok = (data = null, message = 'Success', statusCode = 200) => {
+        return res.status(statusCode).json({
+            success: true,
+            message,
+            data,
+        });
+    };
+
+    res.fail = (message = 'Request failed', statusCode = 500, errorCode = 'SERVER_ERROR', details = null) => {
+        return res.status(statusCode).json({
+            success: false,
+            message,
+            errorCode,
+            details,
+        });
+    };
+
+    next();
+});
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.uouce.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -104,7 +124,7 @@ async function run() {
                 const authHeader = req.headers.authorization;
 
                 if (!authHeader || !authHeader.startsWith('Bearer ')) {
-                    return res.status(401).json({ message: 'Unauthorized. Missing token.' });
+                    return res.fail('Unauthorized. Missing token.', 401, 'AUTH_MISSING_TOKEN');
                 }
 
                 const token = authHeader.split(' ')[1];
@@ -112,29 +132,29 @@ async function run() {
                 const email = decoded?.email;
 
                 if (!email) {
-                    return res.status(401).json({ message: 'Unauthorized token payload.' });
+                    return res.fail('Unauthorized token payload.', 401, 'AUTH_INVALID_TOKEN_PAYLOAD');
                 }
 
                 const user = await userCollection.findOne({ email: String(email) });
 
                 if (!user) {
-                    return res.status(401).json({ message: 'Unauthorized user.' });
+                    return res.fail('Unauthorized user.', 401, 'AUTH_USER_NOT_FOUND');
                 }
 
                 req.user = user;
                 next();
             } catch (error) {
-                res.status(500).json({ message: 'Authorization check failed.' });
+                res.fail('Authorization check failed.', 401, 'AUTH_VERIFICATION_FAILED');
             }
         };
 
         const requireRole = (roles = []) => (req, res, next) => {
             if (!req.user) {
-                return res.status(401).json({ message: 'Unauthorized user.' });
+                return res.fail('Unauthorized user.', 401, 'AUTH_USER_NOT_FOUND');
             }
 
             if (!roles.includes(req.user.role)) {
-                return res.status(403).json({ message: 'Forbidden: insufficient role permission.' });
+                return res.fail('Forbidden: insufficient role permission.', 403, 'AUTH_ROLE_FORBIDDEN');
             }
 
             next();
@@ -144,7 +164,7 @@ async function run() {
             const value = req.params?.[paramName];
 
             if (!ObjectId.isValid(value)) {
-                return res.status(400).json({ message: `Invalid ${paramName}` });
+                return res.fail(`Invalid ${paramName}`, 400, 'INVALID_OBJECT_ID');
             }
 
             next();
@@ -211,7 +231,7 @@ async function run() {
                     apartmentCollection.countDocuments(query),
                 ]);
 
-                res.json({
+                res.ok({
                     data: apartments,
                     pagination: {
                         page: currentPage,
@@ -221,7 +241,7 @@ async function run() {
                     },
                 });
             } catch (error) {
-                res.status(500).json({ message: 'Failed to fetch apartments' });
+                res.fail('Failed to fetch apartments', 500, 'APARTMENT_LIST_FAILED');
             }
         });
 
@@ -250,7 +270,7 @@ async function run() {
                 const apartment = buildApartmentData(req.body);
 
                 if (!apartment.title || (!apartment.image && !apartment.icon)) {
-                    return res.status(400).json({ message: 'Title and image/icon are required.' });
+                    return res.fail('Title and image/icon are required.', 400, 'APARTMENT_VALIDATION_FAILED');
                 }
 
                 const result = await apartmentCollection.insertOne({
@@ -259,9 +279,9 @@ async function run() {
                     updatedAt: new Date(),
                 });
 
-                res.status(201).json({ message: 'Apartment created successfully', apartmentId: result.insertedId });
+                res.ok({ apartmentId: result.insertedId }, 'Apartment created successfully', 201);
             } catch (error) {
-                res.status(500).json({ message: 'Failed to create apartment', error: error.message });
+                res.fail('Failed to create apartment', 500, 'APARTMENT_CREATE_FAILED');
             }
         });
 
@@ -271,7 +291,7 @@ async function run() {
                 const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
 
                 if (!apartment) {
-                    return res.status(404).json({ message: 'Apartment not found' });
+                    return res.fail('Apartment not found', 404, 'APARTMENT_NOT_FOUND');
                 }
 
                 const updatedApartment = buildApartmentData(req.body, apartment);
@@ -281,9 +301,9 @@ async function run() {
                     { $set: { ...updatedApartment, updatedAt: new Date() } }
                 );
 
-                res.json({ message: 'Apartment updated successfully' });
+                res.ok(null, 'Apartment updated successfully');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to update apartment', error: error.message });
+                res.fail('Failed to update apartment', 500, 'APARTMENT_UPDATE_FAILED');
             }
         });
 
@@ -293,7 +313,7 @@ async function run() {
                 const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
 
                 if (!apartment) {
-                    return res.status(404).json({ message: 'Apartment not found' });
+                    return res.fail('Apartment not found', 404, 'APARTMENT_NOT_FOUND');
                 }
 
                 const relatedApartments = await apartmentCollection
@@ -306,7 +326,7 @@ async function run() {
                     .limit(4)
                     .toArray();
 
-                res.json({
+                res.ok({
                     item: apartment,
                     sections: {
                         overview: apartment.overview || apartment.description || '',
@@ -320,11 +340,7 @@ async function run() {
                     actions: apartment.actions || ['view'],
                 });
             } catch (error) {
-                if (error?.message?.includes('input must be a 24 character hex string')) {
-                    return res.status(400).json({ message: 'Invalid apartment id' });
-                }
-
-                res.status(500).json({ message: 'Failed to fetch apartment details', error: error.message });
+                res.fail('Failed to fetch apartment details', 500, 'APARTMENT_DETAILS_FAILED');
             }
         });
 
@@ -426,18 +442,20 @@ async function run() {
                 const { email, password, displayName } = req.body;
 
                 if (!email || !password || !displayName) {
-                    return res.status(400).json({ message: 'Email, password and display name are required.' });
+                    return res.fail('Email, password and display name are required.', 400, 'AUTH_REGISTER_VALIDATION_FAILED');
                 }
 
                 if (!isStrongPassword(password)) {
-                    return res.status(400).json({
-                        message: 'Password must be at least 8 chars and include uppercase, lowercase, number, and special character.',
-                    });
+                    return res.fail(
+                        'Password must be at least 8 chars and include uppercase, lowercase, number, and special character.',
+                        400,
+                        'AUTH_WEAK_PASSWORD'
+                    );
                 }
 
                 const existingUser = await userCollection.findOne({ email });
                 if (existingUser) {
-                    return res.status(409).json({ message: 'User already exists.' });
+                    return res.fail('User already exists.', 409, 'AUTH_USER_EXISTS');
                 }
 
                 const newUser = {
@@ -456,13 +474,9 @@ async function run() {
                     { expiresIn: JWT_EXPIRES_IN }
                 );
 
-                res.status(201).json({
-                    message: 'User registered successfully',
-                    userId: result.insertedId,
-                    token,
-                });
+                res.ok({ userId: result.insertedId, token }, 'User registered successfully', 201);
             } catch (error) {
-                res.status(500).json({ message: 'Failed to register user' });
+                res.fail('Failed to register user', 500, 'AUTH_REGISTER_FAILED');
             }
         });
 
@@ -474,7 +488,7 @@ async function run() {
                 const attemptData = loginAttempts.get(attemptKey);
 
                 if (attemptData && currentTime - attemptData.firstAttemptAt < LOGIN_ATTEMPT_WINDOW_MS && attemptData.count >= MAX_LOGIN_ATTEMPTS) {
-                    return res.status(429).json({ message: 'Too many login attempts. Please try again later.' });
+                    return res.fail('Too many login attempts. Please try again later.', 429, 'AUTH_RATE_LIMITED');
                 }
 
                 if (attemptData && currentTime - attemptData.firstAttemptAt >= LOGIN_ATTEMPT_WINDOW_MS) {
@@ -482,7 +496,7 @@ async function run() {
                 }
 
                 if (!email || !password) {
-                    return res.status(400).json({ message: 'Email and password are required.' });
+                    return res.fail('Email and password are required.', 400, 'AUTH_LOGIN_VALIDATION_FAILED');
                 }
 
                 const user = await userCollection.findOne({ email });
@@ -493,7 +507,7 @@ async function run() {
                     } else {
                         loginAttempts.set(attemptKey, { ...failedData, count: failedData.count + 1 });
                     }
-                    return res.status(401).json({ message: 'Invalid credentials.' });
+                    return res.fail('Invalid credentials.', 401, 'AUTH_INVALID_CREDENTIALS');
                 }
 
                 const isValidPassword = verifyPassword(password, user.password);
@@ -504,7 +518,7 @@ async function run() {
                     } else {
                         loginAttempts.set(attemptKey, { ...failedData, count: failedData.count + 1 });
                     }
-                    return res.status(401).json({ message: 'Invalid credentials.' });
+                    return res.fail('Invalid credentials.', 401, 'AUTH_INVALID_CREDENTIALS');
                 }
 
                 loginAttempts.delete(attemptKey);
@@ -520,17 +534,16 @@ async function run() {
                     { expiresIn: JWT_EXPIRES_IN }
                 );
 
-                res.json({
-                    message: 'Login successful',
+                res.ok({
                     token,
                     user: {
                         email: user.email,
                         displayName: user.displayName,
                         role: user.role || 'user',
                     },
-                });
+                }, 'Login successful');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to login user' });
+                res.fail('Failed to login user', 500, 'AUTH_LOGIN_FAILED');
             }
         });
 
