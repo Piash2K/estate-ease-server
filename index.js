@@ -136,6 +136,26 @@ async function run() {
             }
         });
 
+        app.get('/apartments/filters/options', async (req, res) => {
+            try {
+                const [statuses, locations, types] = await Promise.all([
+                    apartmentCollection.distinct('meta.status', { isPublic: true }),
+                    apartmentCollection.distinct('meta.location', { isPublic: true }),
+                    apartmentCollection.distinct('meta.type', { isPublic: true }),
+                ]);
+
+                res.json({
+                    statuses,
+                    locations,
+                    types,
+                    sortBy: ['createdAt', 'meta.price', 'meta.rating', 'title', 'meta.date'],
+                    sortOrder: ['asc', 'desc'],
+                });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch apartment filter options' });
+            }
+        });
+
         app.post('/apartments', async (req, res) => {
             try {
                 const apartment = buildApartmentData(req.body);
