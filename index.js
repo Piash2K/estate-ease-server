@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const crypto = require('crypto');
 require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
@@ -31,6 +32,19 @@ const buildApartmentData = (body, existingApartment = {}) => ({
     },
     isPublic: body.isPublic ?? existingApartment.isPublic ?? true,
 });
+
+const hashPassword = (password, salt = crypto.randomBytes(16).toString('hex')) => {
+    const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+    return `${salt}:${hash}`;
+};
+
+const verifyPassword = (password, storedPassword) => {
+    const [salt, hash] = String(storedPassword || '').split(':');
+    if (!salt || !hash) return false;
+
+    const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(testHash, 'hex'));
+};
 
 // Middleware
 app.use(cors());
@@ -66,6 +80,39 @@ async function run() {
         await apartmentCollection.createIndex({ 'meta.price': 1, 'meta.rating': -1 });
         await apartmentCollection.createIndex({ title: 'text', shortDescription: 'text', overview: 'text', description: 'text' });
         await reviewCollection.createIndex({ apartmentId: 1, createdAt: -1 });
+
+        const requireAuth = async (req, res, next) => {
+            try {
+                const email = req.headers['x-user-email'];
+
+                if (!email) {
+                    return res.status(401).json({ message: 'Unauthorized. Missing user email header.' });
+                }
+
+                const user = await userCollection.findOne({ email: String(email) });
+
+                if (!user) {
+                    return res.status(401).json({ message: 'Unauthorized user.' });
+                }
+
+                req.user = user;
+                next();
+            } catch (error) {
+                res.status(500).json({ message: 'Authorization check failed.' });
+            }
+        };
+
+        const requireRole = (roles = []) => (req, res, next) => {
+            if (!req.user) {
+                return res.status(401).json({ message: 'Unauthorized user.' });
+            }
+
+            if (!roles.includes(req.user.role)) {
+                return res.status(403).json({ message: 'Forbidden: insufficient role permission.' });
+            }
+
+            next();
+        };
 
         // Routes
 
@@ -338,6 +385,75 @@ async function run() {
             }
         });
 
+        app.post(['/auth/register', '/register'], async (req, res) => {
+            try {
+                const { email, password, displayName } = req.body;
+
+                if (!email || !password || !displayName) {
+                    return res.status(400).json({ message: 'Email, password and display name are required.' });
+                }
+
+                const existingUser = await userCollection.findOne({ email });
+                if (existingUser) {
+                    return res.status(409).json({ message: 'User already exists.' });
+                }
+
+                const newUser = {
+                    email,
+                    displayName,
+                    role: 'user',
+                    password: hashPassword(password),
+                    lastLogin: new Date(),
+                    createdAt: new Date(),
+                };
+
+                const result = await userCollection.insertOne(newUser);
+
+                res.status(201).json({
+                    message: 'User registered successfully',
+                    userId: result.insertedId,
+                });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to register user' });
+            }
+        });
+
+        app.post(['/auth/login', '/login'], async (req, res) => {
+            try {
+                const { email, password } = req.body;
+
+                if (!email || !password) {
+                    return res.status(400).json({ message: 'Email and password are required.' });
+                }
+
+                const user = await userCollection.findOne({ email });
+                if (!user || !user.password) {
+                    return res.status(401).json({ message: 'Invalid credentials.' });
+                }
+
+                const isValidPassword = verifyPassword(password, user.password);
+                if (!isValidPassword) {
+                    return res.status(401).json({ message: 'Invalid credentials.' });
+                }
+
+                await userCollection.updateOne(
+                    { email },
+                    { $set: { lastLogin: new Date() } }
+                );
+
+                res.json({
+                    message: 'Login successful',
+                    user: {
+                        email: user.email,
+                        displayName: user.displayName,
+                        role: user.role || 'user',
+                    },
+                });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to login user' });
+            }
+        });
+
         app.post('/agreements', async (req, res) => {
             const { userName, userEmail, floorNo, blockName, apartmentNo, rent } = req.body;
 
@@ -446,7 +562,7 @@ async function run() {
                 res.status(500).json({ message: 'Failed to validate coupon' });
             }
         });
-        app.post('/coupons', async (req, res) => {
+        app.post('/coupons', requireAuth, requireRole(['admin']), async (req, res) => {
             const { code, discount, expiration, description
             } = req.body;
 
@@ -470,7 +586,7 @@ async function run() {
                     res.status(500).json({ message: 'Failed to fetch coupons' });
                 });
         })
-        app.put('/coupons/:id', (req, res) => {
+        app.put('/coupons/:id', requireAuth, requireRole(['admin']), (req, res) => {
             const { id } = req.params;
             const { code, discount, expiration, description } = req.body;
 
@@ -494,7 +610,7 @@ async function run() {
                 })
                 .catch(error => res.status(500).json({ message: 'Failed to update coupon', error }));
         });
-        app.delete('/coupons/:id', (req, res) => {
+        app.delete('/coupons/:id', requireAuth, requireRole(['admin']), (req, res) => {
             const { id } = req.params;
 
             couponCollection.deleteOne({ _id: new ObjectId(id) })
@@ -551,7 +667,7 @@ async function run() {
         });
 
         // Update User Role to "user"
-        app.put('/users/:id', async (req, res) => {
+        app.put('/users/:id', requireAuth, requireRole(['admin']), async (req, res) => {
             const { id } = req.params;
             const { role } = req.body;
 
@@ -654,7 +770,7 @@ async function run() {
 
 
         // Accept or Reject Agreement - Combined
-        app.put('/agreements/:id/update', (req, res) => {
+        app.put('/agreements/:id/update', requireAuth, requireRole(['admin', 'manager']), (req, res) => {
             const { id } = req.params;
             const { status, role } = req.body;
 
