@@ -8,11 +8,60 @@ const app = express();
 const port = process.env.PORT || 5000;
 const Stripe = require('stripe');
 
+let firebaseAdmin = null;
+try {
+    firebaseAdmin = require('firebase-admin');
+} catch (error) {
+    console.warn('firebase-admin is not installed. Firebase token verification routes will be unavailable until it is added.');
+}
+
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const JWT_SECRET = process.env.JWT_SECRET || 'estate-ease-dev-secret';
 const JWT_EXPIRES_IN = '7d';
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+
+const getFirebasePrivateKey = () => {
+    const rawKey = process.env.FIREBASE_PRIVATE_KEY;
+    return rawKey ? rawKey.replace(/\\n/g, '\n') : '';
+};
+
+const canInitializeFirebaseAdmin = () => {
+    return Boolean(
+        firebaseAdmin
+        && process.env.FIREBASE_PROJECT_ID
+        && process.env.FIREBASE_CLIENT_EMAIL
+        && getFirebasePrivateKey()
+    );
+};
+
+const initializeFirebaseAdmin = () => {
+    if (!canInitializeFirebaseAdmin()) {
+        return false;
+    }
+
+    if (!firebaseAdmin.apps.length) {
+        firebaseAdmin.initializeApp({
+            credential: firebaseAdmin.credential.cert({
+                projectId: process.env.FIREBASE_PROJECT_ID,
+                clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+                privateKey: getFirebasePrivateKey(),
+            }),
+        });
+    }
+
+    return true;
+};
+
+const verifyFirebaseIdToken = async (token) => {
+    if (!initializeFirebaseAdmin()) {
+        const error = new Error('Firebase Admin SDK is not configured.');
+        error.code = 'FIREBASE_ADMIN_NOT_CONFIGURED';
+        throw error;
+    }
+
+    return firebaseAdmin.auth().verifyIdToken(token);
+};
 
 const buildApartmentData = (body, existingApartment = {}) => ({
     title: body.title || existingApartment.title,
@@ -59,6 +108,8 @@ const isStrongPassword = (password = '') => {
 app.use(cors());
 app.use(express.json());
 app.use((req, res, next) => {
+    const originalJson = res.json.bind(res);
+
     res.ok = (data = null, message = 'Success', statusCode = 200) => {
         return res.status(statusCode).json({
             success: true,
@@ -76,6 +127,52 @@ app.use((req, res, next) => {
         });
     };
 
+    // Keep legacy res.json/res.status().json handlers consistent with the unified API shape.
+    res.json = (payload) => {
+        if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'success')) {
+            return originalJson(payload);
+        }
+
+        const statusCode = res.statusCode || 200;
+
+        if (statusCode >= 400) {
+            const message = payload && typeof payload === 'object' && payload.message
+                ? payload.message
+                : 'Request failed';
+
+            const details = payload && typeof payload === 'object'
+                ? {
+                    ...payload,
+                    message: undefined,
+                }
+                : null;
+
+            return originalJson({
+                success: false,
+                message,
+                errorCode: 'REQUEST_FAILED',
+                details,
+            });
+        }
+
+        if (payload && typeof payload === 'object' && !Array.isArray(payload) && Object.prototype.hasOwnProperty.call(payload, 'message')) {
+            const { message, ...rest } = payload;
+            const hasData = Object.keys(rest).length > 0;
+
+            return originalJson({
+                success: true,
+                message,
+                data: hasData ? rest : null,
+            });
+        }
+
+        return originalJson({
+            success: true,
+            message: 'Success',
+            data: payload,
+        });
+    };
+
     next();
 });
 
@@ -85,8 +182,8 @@ const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster
 const client = new MongoClient(uri, {
     serverApi: {
         version: ServerApiVersion.v1,
-        strict: true,
-        deprecationErrors: true,
+        strict: false,
+        deprecationErrors: false,
     },
 });
 
@@ -108,14 +205,20 @@ async function run() {
         const contactMessageCollection = client.db('estateEase').collection('contactMessages');
         const newsletterCollection = client.db('estateEase').collection('newsletters');
 
-        await apartmentCollection.createIndex({ isPublic: 1, createdAt: -1 });
-        await apartmentCollection.createIndex({ 'meta.status': 1, 'meta.location': 1, 'meta.type': 1 });
-        await apartmentCollection.createIndex({ 'meta.price': 1, 'meta.rating': -1 });
-        await apartmentCollection.createIndex({ title: 'text', shortDescription: 'text', overview: 'text', description: 'text' });
-        await reviewCollection.createIndex({ apartmentId: 1, createdAt: -1 });
-        await sitePageCollection.createIndex({ slug: 1 }, { unique: true });
-        await blogCollection.createIndex({ createdAt: -1 });
-        await newsletterCollection.createIndex({ email: 1 }, { unique: true });
+        (async () => {
+            try {
+                await apartmentCollection.createIndex({ isPublic: 1, createdAt: -1 });
+                await apartmentCollection.createIndex({ 'meta.status': 1, 'meta.location': 1, 'meta.type': 1 });
+                await apartmentCollection.createIndex({ 'meta.price': 1, 'meta.rating': -1 });
+                await apartmentCollection.createIndex({ title: 'text', shortDescription: 'text', overview: 'text', description: 'text' });
+                await reviewCollection.createIndex({ apartmentId: 1, createdAt: -1 });
+                await sitePageCollection.createIndex({ slug: 1 }, { unique: true });
+                await blogCollection.createIndex({ createdAt: -1 });
+                await newsletterCollection.createIndex({ email: 1 }, { unique: true });
+            } catch (indexError) {
+                console.error('Index initialization failed. Continuing without blocking route setup.', indexError?.message || indexError);
+            }
+        })();
 
         const loginAttempts = new Map();
 
@@ -128,7 +231,18 @@ async function run() {
                 }
 
                 const token = authHeader.split(' ')[1];
-                const decoded = jwt.verify(token, JWT_SECRET);
+                let decoded = null;
+
+                try {
+                    decoded = jwt.verify(token, JWT_SECRET);
+                } catch (jwtError) {
+                    try {
+                        decoded = await verifyFirebaseIdToken(token);
+                    } catch (firebaseError) {
+                        return res.fail('Authorization check failed.', 401, 'AUTH_VERIFICATION_FAILED');
+                    }
+                }
+
                 const email = decoded?.email;
 
                 if (!email) {
@@ -142,6 +256,11 @@ async function run() {
                 }
 
                 req.user = user;
+                req.auth = {
+                    email,
+                    uid: decoded?.uid || null,
+                    tokenType: decoded?.uid ? 'firebase' : 'jwt',
+                };
                 next();
             } catch (error) {
                 res.fail('Authorization check failed.', 401, 'AUTH_VERIFICATION_FAILED');
@@ -193,7 +312,9 @@ async function run() {
                 const perPage = Math.min(50, Math.max(1, parseInt(limit) || 12));
                 const skip = (currentPage - 1) * perPage;
 
-                const query = { isPublic: true };
+                const query = {
+                    $or: [{ isPublic: true }, { isPublic: { $exists: false } }],
+                };
 
                 if (search.trim()) {
                     query.$or = [
@@ -248,9 +369,9 @@ async function run() {
         app.get('/apartments/filters/options', async (req, res) => {
             try {
                 const [statuses, locations, types] = await Promise.all([
-                    apartmentCollection.distinct('meta.status', { isPublic: true }),
-                    apartmentCollection.distinct('meta.location', { isPublic: true }),
-                    apartmentCollection.distinct('meta.type', { isPublic: true }),
+                    apartmentCollection.distinct('meta.status', { $or: [{ isPublic: true }, { isPublic: { $exists: false } }] }),
+                    apartmentCollection.distinct('meta.location', { $or: [{ isPublic: true }, { isPublic: { $exists: false } }] }),
+                    apartmentCollection.distinct('meta.type', { $or: [{ isPublic: true }, { isPublic: { $exists: false } }] }),
                 ]);
 
                 res.json({
@@ -319,7 +440,7 @@ async function run() {
                 const relatedApartments = await apartmentCollection
                     .find({
                         _id: { $ne: new ObjectId(id) },
-                        isPublic: true,
+                        $or: [{ isPublic: true }, { isPublic: { $exists: false } }],
                         'meta.type': apartment?.meta?.type || 'apartment',
                     })
                     .sort({ 'meta.rating': -1, createdAt: -1 })
@@ -349,13 +470,13 @@ async function run() {
                 const { id } = req.params;
                 const reviews = await reviewCollection.find({ apartmentId: id }).sort({ createdAt: -1 }).toArray();
 
-                res.json(reviews);
+                res.ok(reviews, 'Apartment reviews fetched successfully');
             } catch (error) {
                 if (error?.message?.includes('input must be a 24 character hex string')) {
-                    return res.status(400).json({ message: 'Invalid apartment id' });
+                    return res.fail('Invalid apartment id', 400, 'INVALID_APARTMENT_ID');
                 }
 
-                res.status(500).json({ message: 'Failed to fetch apartment reviews' });
+                res.fail('Failed to fetch apartment reviews', 500, 'APARTMENT_REVIEW_LIST_FAILED');
             }
         });
 
@@ -365,7 +486,7 @@ async function run() {
                 const { userName, userEmail, comment, rating } = req.body;
 
                 if (!comment || !String(comment).trim()) {
-                    return res.status(400).json({ message: 'Comment is required' });
+                    return res.fail('Comment is required', 400, 'REVIEW_VALIDATION_FAILED');
                 }
 
                 const newReview = {
@@ -388,13 +509,13 @@ async function run() {
                     { $set: { 'meta.rating': averageRating, updatedAt: new Date() } }
                 );
 
-                res.status(201).json({ message: 'Review added successfully' });
+                res.ok(null, 'Review added successfully', 201);
             } catch (error) {
                 if (error?.message?.includes('input must be a 24 character hex string')) {
-                    return res.status(400).json({ message: 'Invalid apartment id' });
+                    return res.fail('Invalid apartment id', 400, 'INVALID_APARTMENT_ID');
                 }
 
-                res.status(500).json({ message: 'Failed to add review' });
+                res.fail('Failed to add review', 500, 'REVIEW_CREATE_FAILED');
             }
         });
 
@@ -404,12 +525,12 @@ async function run() {
                 const { action, userEmail } = req.body;
 
                 if (!action) {
-                    return res.status(400).json({ message: 'Action is required' });
+                    return res.fail('Action is required', 400, 'APARTMENT_ACTION_VALIDATION_FAILED');
                 }
 
                 const apartment = await apartmentCollection.findOne({ _id: new ObjectId(id) });
                 if (!apartment) {
-                    return res.status(404).json({ message: 'Apartment not found' });
+                    return res.fail('Apartment not found', 404, 'APARTMENT_NOT_FOUND');
                 }
 
                 await apartmentCollection.updateOne(
@@ -427,13 +548,13 @@ async function run() {
                     }
                 );
 
-                res.json({ message: 'Action recorded successfully' });
+                res.ok(null, 'Action recorded successfully');
             } catch (error) {
                 if (error?.message?.includes('input must be a 24 character hex string')) {
-                    return res.status(400).json({ message: 'Invalid apartment id' });
+                    return res.fail('Invalid apartment id', 400, 'INVALID_APARTMENT_ID');
                 }
 
-                res.status(500).json({ message: 'Failed to record action' });
+                res.fail('Failed to record action', 500, 'APARTMENT_ACTION_FAILED');
             }
         });
 
@@ -547,6 +668,83 @@ async function run() {
             }
         });
 
+        app.post(['/jwt', '/auth/token', '/auth/firebase-token'], async (req, res) => {
+            try {
+                const authHeader = req.headers.authorization;
+                const bodyToken = req.body?.firebaseToken || req.body?.token || req.body?.idToken;
+                const firebaseToken = bodyToken || (authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : '');
+                const requestedEmail = String(req.body?.email || '').trim().toLowerCase();
+
+                if (!firebaseToken) {
+                    return res.fail('Firebase token is required.', 400, 'AUTH_FIREBASE_TOKEN_REQUIRED');
+                }
+
+                const decoded = await verifyFirebaseIdToken(firebaseToken);
+                const tokenEmail = String(decoded?.email || '').trim().toLowerCase();
+
+                if (!tokenEmail) {
+                    return res.fail('Firebase token does not include an email address.', 401, 'AUTH_FIREBASE_EMAIL_MISSING');
+                }
+
+                if (requestedEmail && requestedEmail !== tokenEmail) {
+                    return res.fail('Token email mismatch.', 401, 'AUTH_FIREBASE_EMAIL_MISMATCH');
+                }
+
+                const existingUser = await userCollection.findOne({ email: tokenEmail });
+                if (!existingUser) {
+                    await userCollection.insertOne({
+                        email: tokenEmail,
+                        displayName: decoded?.name || req.body?.displayName || '',
+                        role: req.body?.role || 'user',
+                        firebaseUid: decoded?.uid || '',
+                        lastLogin: new Date(),
+                        createdAt: new Date(),
+                    });
+                } else {
+                    await userCollection.updateOne(
+                        { email: tokenEmail },
+                        {
+                            $set: {
+                                firebaseUid: decoded?.uid || existingUser.firebaseUid || '',
+                                displayName: decoded?.name || req.body?.displayName || existingUser.displayName || '',
+                                lastLogin: new Date(),
+                            },
+                        }
+                    );
+                }
+
+                const currentUser = await userCollection.findOne({ email: tokenEmail });
+                const appToken = jwt.sign(
+                    {
+                        email: tokenEmail,
+                        uid: decoded?.uid || null,
+                        role: currentUser?.role || 'user',
+                    },
+                    JWT_SECRET,
+                    { expiresIn: JWT_EXPIRES_IN }
+                );
+
+                res.ok({
+                    token: appToken,
+                    user: {
+                        email: currentUser?.email || tokenEmail,
+                        displayName: currentUser?.displayName || decoded?.name || '',
+                        role: currentUser?.role || 'user',
+                    },
+                }, 'Backend token generated successfully');
+            } catch (error) {
+                if (error?.code === 'FIREBASE_ADMIN_NOT_CONFIGURED') {
+                    return res.fail(
+                        'Firebase Admin SDK is not configured on the server.',
+                        500,
+                        'AUTH_FIREBASE_ADMIN_NOT_CONFIGURED'
+                    );
+                }
+
+                res.fail('Invalid Firebase token.', 401, 'AUTH_FIREBASE_TOKEN_INVALID');
+            }
+        });
+
         app.get('/dashboard/menu', requireAuth, (req, res) => {
             const role = req.user?.role || 'user';
 
@@ -561,6 +759,38 @@ async function run() {
                 role,
                 items: ['overview', 'my-profile', 'my-agreements'],
             });
+        });
+
+        app.get('/public/overview', async (req, res) => {
+            try {
+                const [totalApartments, totalAnnouncements, totalPublishedBlogs, totalReviews] = await Promise.all([
+                    apartmentCollection.countDocuments({ $or: [{ isPublic: true }, { isPublic: { $exists: false } }] }),
+                    announcementCollection.countDocuments(),
+                    blogCollection.countDocuments({ isPublished: { $ne: false } }),
+                    reviewCollection.countDocuments(),
+                ]);
+
+                const ratingData = await reviewCollection.aggregate([
+                    {
+                        $group: {
+                            _id: null,
+                            avgRating: { $avg: { $ifNull: ['$rating', 0] } },
+                        },
+                    },
+                ]).toArray();
+
+                const averageRating = ratingData.length ? Number(ratingData[0].avgRating || 0) : 0;
+
+                res.ok({
+                    totalApartments,
+                    totalAnnouncements,
+                    totalPublishedBlogs,
+                    totalReviews,
+                    averageRating,
+                }, 'Public overview fetched successfully');
+            } catch (error) {
+                res.fail('Failed to fetch public overview', 500, 'PUBLIC_OVERVIEW_FAILED');
+            }
         });
 
         app.get('/dashboard/overview', requireAuth, async (req, res) => {
@@ -748,7 +978,7 @@ async function run() {
                     blogCollection.countDocuments({ isPublished: { $ne: false } }),
                 ]);
 
-                res.json({
+                res.ok({
                     data,
                     pagination: {
                         page,
@@ -756,9 +986,9 @@ async function run() {
                         total,
                         totalPages: Math.ceil(total / limit),
                     },
-                });
+                }, 'Blogs fetched successfully');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to fetch blogs' });
+                res.fail('Failed to fetch blogs', 500, 'BLOG_LIST_FAILED');
             }
         });
 
@@ -768,12 +998,12 @@ async function run() {
                 const blog = await blogCollection.findOne({ _id: new ObjectId(id), isPublished: { $ne: false } });
 
                 if (!blog) {
-                    return res.status(404).json({ message: 'Blog not found' });
+                    return res.fail('Blog not found', 404, 'BLOG_NOT_FOUND');
                 }
 
-                res.json(blog);
+                res.ok(blog, 'Blog details fetched successfully');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to fetch blog details' });
+                res.fail('Failed to fetch blog details', 500, 'BLOG_DETAILS_FAILED');
             }
         });
 
@@ -782,7 +1012,7 @@ async function run() {
                 const { title, coverImage, summary, content, tags = [], isPublished = true } = req.body;
 
                 if (!title || !summary) {
-                    return res.status(400).json({ message: 'Title and summary are required' });
+                    return res.fail('Title and summary are required', 400, 'BLOG_VALIDATION_FAILED');
                 }
 
                 const result = await blogCollection.insertOne({
@@ -797,9 +1027,9 @@ async function run() {
                     updatedAt: new Date(),
                 });
 
-                res.status(201).json({ message: 'Blog created successfully', blogId: result.insertedId });
+                res.ok({ blogId: result.insertedId }, 'Blog created successfully', 201);
             } catch (error) {
-                res.status(500).json({ message: 'Failed to create blog' });
+                res.fail('Failed to create blog', 500, 'BLOG_CREATE_FAILED');
             }
         });
 
@@ -926,9 +1156,9 @@ async function run() {
                 };
 
                 const result = await paymentCollection.insertOne(newPayment);
-                res.status(201).json({ message: 'Payment recorded successfully', paymentId: result.insertedId });
+                res.ok({ paymentId: result.insertedId }, 'Payment recorded successfully', 201);
             } catch (error) {
-                res.status(500).json({ message: 'Failed to record payment' });
+                res.fail('Failed to record payment', 500, 'PAYMENT_CREATE_FAILED');
             }
         });
 
@@ -937,9 +1167,9 @@ async function run() {
 
             try {
                 const payments = await paymentCollection.find({ userEmail: email }).toArray();
-                res.json(payments);
+                res.ok(payments, 'Payment history fetched successfully');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to fetch payment history' });
+                res.fail('Failed to fetch payment history', 500, 'PAYMENT_LIST_FAILED');
             }
         });
 
@@ -951,11 +1181,11 @@ async function run() {
                 const couponDetails = await couponCollection.findOne({ code: coupon });
                 if (!couponDetails || new Date(couponDetails.expiration
                 ) < new Date()) {
-                    return res.status(404).json({ message: 'Invalid or expired coupon' });
+                    return res.fail('Invalid or expired coupon', 404, 'COUPON_INVALID_OR_EXPIRED');
                 }
-                res.json(couponDetails);
+                res.ok(couponDetails, 'Coupon validated successfully');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to validate coupon' });
+                res.fail('Failed to validate coupon', 500, 'COUPON_VALIDATE_FAILED');
             }
         });
         app.post('/coupons', requireAuth, requireRole(['admin']), async (req, res) => {
@@ -967,19 +1197,19 @@ async function run() {
                     code, discount, expiration, description
                 };
                 const result = await couponCollection.insertOne(newCoupon);
-                res.status(201).json({ message: 'Coupon created successfully', couponId: result.insertedId });
+                res.ok({ couponId: result.insertedId }, 'Coupon created successfully', 201);
             } catch (error) {
-                res.status(500).json({ message: 'Failed to create coupon' });
+                res.fail('Failed to create coupon', 500, 'COUPON_CREATE_FAILED');
             }
         });
         app.get('/coupons', (req, res) => {
             couponCollection.find().toArray()
                 .then(coupons => {
-                    res.json(coupons); // Send all coupons as JSON
+                    res.ok(coupons, 'Coupons fetched successfully');
                 })
                 .catch(error => {
                     console.error('Error fetching coupons:', error);
-                    res.status(500).json({ message: 'Failed to fetch coupons' });
+                    res.fail('Failed to fetch coupons', 500, 'COUPON_LIST_FAILED');
                 });
         })
         app.put('/coupons/:id', requireAuth, requireRole(['admin']), validateObjectIdParam('id'), (req, res) => {
@@ -999,12 +1229,12 @@ async function run() {
             )
                 .then(result => {
                     if (result.matchedCount === 0) {
-                        res.status(404).json({ message: 'Coupon not found' });
+                        res.fail('Coupon not found', 404, 'COUPON_NOT_FOUND');
                     } else {
-                        res.json({ message: 'Coupon updated successfully' });
+                        res.ok(null, 'Coupon updated successfully');
                     }
                 })
-                .catch(error => res.status(500).json({ message: 'Failed to update coupon', error }));
+                .catch(error => res.fail('Failed to update coupon', 500, 'COUPON_UPDATE_FAILED'));
         });
         app.delete('/coupons/:id', requireAuth, requireRole(['admin']), validateObjectIdParam('id'), (req, res) => {
             const { id } = req.params;
@@ -1012,12 +1242,12 @@ async function run() {
             couponCollection.deleteOne({ _id: new ObjectId(id) })
                 .then(result => {
                     if (result.deletedCount === 0) {
-                        res.status(404).json({ message: 'Coupon not found' });
+                        res.fail('Coupon not found', 404, 'COUPON_NOT_FOUND');
                     } else {
-                        res.json({ message: 'Coupon deleted successfully' });
+                        res.ok(null, 'Coupon deleted successfully');
                     }
                 })
-                .catch(error => res.status(500).json({ message: 'Failed to delete coupon', error }));
+                .catch(error => res.fail('Failed to delete coupon', 500, 'COUPON_DELETE_FAILED'));
         });
         // users related apis
         app.post('/users', async (req, res) => {
@@ -1095,47 +1325,52 @@ async function run() {
 
             announcementCollection.insertOne(newAnnouncement)
                 .then(result => {
-                    res.status(201).json({
-                        message: 'Announcement created successfully',
-                        announcementId: result.insertedId,
-                    });
+                    res.ok({ announcementId: result.insertedId }, 'Announcement created successfully', 201);
                 })
                 .catch(error => {
                     console.error(error);
-                    res.status(500).json({ message: 'Failed to create announcement' });
+                    res.fail('Failed to create announcement', 500, 'ANNOUNCEMENT_CREATE_FAILED');
                 });
         });
         app.get('/announcements', (req, res) => {
             announcementCollection.find().toArray()
                 .then(announcements => {
-                    res.json(announcements);
+                    res.ok(announcements, 'Announcements fetched successfully');
                 })
                 .catch(error => {
                     console.error(error);
-                    res.status(500).json({ message: 'Failed to fetch announcements' });
+                    res.fail('Failed to fetch announcements', 500, 'ANNOUNCEMENT_LIST_FAILED');
                 });
         });
         app.get('/reviews', async (req, res) => {
             try {
                 const reviews = await reviewCollection.find().toArray();
-                res.json(reviews);
+                res.ok(reviews, 'Reviews fetched successfully');
             } catch (error) {
-                res.status(500).json({ message: 'Failed to fetch reviews', error });
+                res.fail('Failed to fetch reviews', 500, 'REVIEW_LIST_FAILED');
             }
         });
         app.post('/create-payment-intent', async (req, res) => {
-            const { price } = req.body;
-            const amount = parseInt(price * 100);
-            console.log('final amount',amount)
+            try {
+                const { price } = req.body;
+                const amount = parseInt(price * 100);
 
-            const paymentIntent = await stripe.paymentIntents.create({
-                amount: amount,
-                currency: 'usd',
-                payment_method_types: ['card']
-            });
-            res.send({
-                clientSecret: paymentIntent.client_secret
-            })
+                if (!amount || amount <= 0) {
+                    return res.fail('Valid price is required', 400, 'PAYMENT_INTENT_VALIDATION_FAILED');
+                }
+
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount,
+                    currency: 'usd',
+                    payment_method_types: ['card'],
+                });
+
+                res.ok({
+                    clientSecret: paymentIntent.client_secret,
+                }, 'Payment intent created successfully');
+            } catch (error) {
+                res.fail('Failed to create payment intent', 500, 'PAYMENT_INTENT_FAILED');
+            }
         });
 
 
@@ -1203,7 +1438,7 @@ run().catch(console.dir);
 
 // Root Endpoint
 app.get('/', (req, res) => {
-    res.send('EstateEase Backend is Running');
+    res.ok({ service: 'EstateEase Backend', status: 'running' }, 'EstateEase Backend is Running');
 });
 
 app.listen(port, () => {
